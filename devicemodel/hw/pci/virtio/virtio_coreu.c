@@ -90,9 +90,6 @@ struct virtio_coreu {
 	pthread_t rx_tid;
 	pthread_mutex_t	rx_mtx;
 	pthread_cond_t rx_cond;
-
-	/* socket handle to CoreU daemon */
-	int fd;
 };
 
 /* VBS-U virtio_ops */
@@ -125,10 +122,53 @@ virtio_coreu_reset(void *vdev)
 }
 
 static int
-send_and_receive(int fd, struct coreu_msg *msg)
+connect_coreu_daemon()
+{
+	struct sockaddr_un addr;
+	int msg_size;
+	int fd;
+	int ret;
+
+	fd = socket(AF_UNIX, SOCK_STREAM, 0);
+	if (fd < 0) {
+		WPRINTF(("socket error %d\n", errno));
+		return -1;
+	}
+
+	memset(&addr, 0, sizeof(addr));
+	addr.sun_family = AF_UNIX;
+	strncpy(addr.sun_path, COREU_SERVICE_NAME, sizeof(addr.sun_path));
+
+	ret = connect(fd, &addr, sizeof(struct sockaddr_un));
+	if (ret < 0) {
+		WPRINTF(("connect error %d\n", errno));
+		close(fd);
+		return -1;
+	}
+
+	msg_size = sizeof(struct coreu_msg);
+	ret = setsockopt(fd, SOL_SOCKET,
+		SO_RCVLOWAT, &msg_size, sizeof(msg_size));
+	if (ret < 0) {
+		WPRINTF(("setsockopt error\n"));
+		close(fd);
+		return -1;
+	}
+	return fd;
+}
+
+static int
+send_and_receive(struct coreu_msg *msg)
 {
 	uint32_t msg_size = sizeof(struct coreu_msg);
 	int ret;
+	int fd;
+
+	fd = connect_coreu_daemon();
+	if (fd < 0) {
+		WPRINTF(("connection to coreu daemon failed\n"));
+		return -errno;
+	}
 
 	ret = send(fd, (void *)msg, msg_size, 0);
 	if (ret < 0) {
@@ -175,11 +215,10 @@ virtio_coreu_thread(void *param)
 
 			msg = (struct coreu_msg *)(iov.iov_base);
 
-			ret = send_and_receive(vcoreu->fd, msg);
+			ret = send_and_receive(msg);
 			if (ret < 0)
 			{
-				close(vcoreu->fd);
-				vcoreu->fd = -1;
+				WPRINTF(("error in communication with coreu daemon\n"));
 			}
 
 			/* release this chain and handle more */
@@ -192,42 +231,6 @@ virtio_coreu_thread(void *param)
 	pthread_exit(NULL);
 }
 
-static int
-connect_coreu_daemon()
-{
-	struct sockaddr_un addr;
-	int msg_size;
-	int fd;
-	int ret;
-
-	fd = socket(AF_UNIX, SOCK_STREAM, 0);
-	if (fd < 0) {
-		WPRINTF(("socket error %d\n", errno));
-		return -1;
-	}
-
-	memset(&addr, 0, sizeof(addr));
-	addr.sun_family = AF_UNIX;
-	strncpy(addr.sun_path, COREU_SERVICE_NAME, sizeof(addr.sun_path));
-
-	ret = connect(fd, &addr, sizeof(struct sockaddr_un));
-	if (ret < 0) {
-		WPRINTF(("connect error %d\n", errno));
-		close(fd);
-		return -1;
-	}
-
-	msg_size = sizeof(struct coreu_msg);
-	ret = setsockopt(fd, SOL_SOCKET,
-		SO_RCVLOWAT, &msg_size, sizeof(msg_size));
-	if (ret < 0) {
-		WPRINTF(("setsockopt error\n"));
-		close(fd);
-		return -1;
-	}
-	return fd;
-}
-
 static void
 virtio_coreu_notify(void *vdev, struct virtio_vq_info *vq)
 {
@@ -236,13 +239,6 @@ virtio_coreu_notify(void *vdev, struct virtio_vq_info *vq)
 	/* Any ring entries to process */
 	if (!vq_has_descs(vq))
 		return;
-
-	vcoreu->fd = (vcoreu->fd < 0) ? connect_coreu_daemon() : vcoreu->fd;
-	if (vcoreu->fd < 0)
-	{
-		WPRINTF(("Invalid CoreU daemon file descriptor\n"));
-		return;
-	}
 
 	/* Signal the thread for processing */
 	pthread_mutex_lock(&vcoreu->rx_mtx);
@@ -302,20 +298,6 @@ virtio_coreu_init(struct vmctx *ctx, struct pci_vdev *dev, char *opts)
 	}
 
 	virtio_set_io_bar(&vcoreu->base, 0);
-
-	/*
-	 * connect to coreu daemon in init phase
-	 *
-	 * @FIXME if failed connecting to CoreU daemon, the return value should
-	 * be set appropriately for SOS not exposing the CoreU PCI device to UOS
-	 */
-	vcoreu->fd = connect_coreu_daemon();
-	if (vcoreu->fd < 0) {
-		WPRINTF(("connection to server failed\n"));
-		pthread_mutex_destroy(&vcoreu->mtx);
-		free(vcoreu);
-		return -errno;
-	}
 
 	pthread_mutex_init(&vcoreu->rx_mtx, NULL);
 	pthread_cond_init(&vcoreu->rx_cond, NULL);
