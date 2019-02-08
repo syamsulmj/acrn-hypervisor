@@ -358,6 +358,7 @@ fi
    -s 3,virtio-blk$boot_dev_flag,/data/$5/$5.img \
    -s 7,xhci,1-1:1-2:1-3:2-1:2-2:2-3:cap=apl \
    -s 8,passthru,0/15/1 \
+   -s 5,virtio-coreu \
    -s 13,virtio-rpmb \
    -s 10,virtio-hyper_dmabuf \
    -s 11,wdt-i6300esb \
